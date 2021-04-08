@@ -1,6 +1,6 @@
 import logging
 
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowFailException, AirflowSkipException
 from airflow.hooks.S3_hook import S3Hook
 from airflow.models import BaseOperator
 from airflow.utils.decorators import apply_defaults
@@ -8,8 +8,8 @@ from airflow.utils.decorators import apply_defaults
 class MultiS3ToS3TransferOperator(BaseOperator):
     """
     Copies data from a source AWS S3 directory to a target AWS S3 directory.
-    This is useful when source and destination buckets are in different
-    accounts and access is provided using two sets of AWS keys instead of
+    Intended for use when the source and target directories are on different
+    AWS accounts and access is provided using two sets of AWS keys instead of
     cross-account access policies.
 
     :param source_aws_conn_id: source s3 connection
@@ -31,15 +31,16 @@ class MultiS3ToS3TransferOperator(BaseOperator):
 
     @apply_defaults
     def __init__(
-            self,
-            source_aws_conn_id,
-            source_s3_bucket,
-            source_s3_dir,
-            dest_aws_conn_id,
-            dest_s3_bucket,
-            dest_s3_dir,
-            replace=False,
-            *args, **kwargs):
+        self,
+        source_aws_conn_id,
+        source_s3_bucket,
+        source_s3_dir,
+        dest_aws_conn_id,
+        dest_s3_bucket,
+        dest_s3_dir,
+        replace=False,
+        *args, **kwargs
+    ):
         super(MultiS3ToS3TransferOperator, self).__init__(*args, **kwargs)
         self.source_aws_conn_id = source_aws_conn_id
         self.source_s3_bucket = source_s3_bucket
@@ -51,35 +52,63 @@ class MultiS3ToS3TransferOperator(BaseOperator):
 
     def execute(self, context):
 
-        source_s3 = S3Hook(self.source_aws_conn_id)
-        dest_s3 = S3Hook(self.dest_aws_conn_id)
-
-        logging.info("Downloading source S3 directory %s", self.source_s3_dir)
+        source_s3_hook = S3Hook(aws_conn_id=self.source_aws_conn_id)
+        dest_s3_hook = S3Hook(aws_conn_id=self.dest_aws_conn_id)
 
         # Confirm directory exists in source bucket:
-        if not source_s3.check_for_prefix(
+        if not source_s3_hook.check_for_prefix(
             bucket_name = self.source_s3_bucket,
             prefix = self.source_s3_dir,
-            delimiter = '/'):
-            raise AirflowException(
-                "The source {0} does not exist".format(self.source_s3_dir))
+            delimiter = '/'
+        ):
+            raise AirflowFailException(
+                f"The source {self.source_s3_dir} does not exist."
+            )
+        # Check if destination directory already exists:
+        elif dest_s3_hook.check_for_prefix(
+            bucket_name = self.dest_s3_bucket,
+            prefix = self.dest_s3_dir,
+            delimiter = '/'
+        ):
+            raise AirflowSkipException(
+                f"The dest {self.dest_s3_dir} already exists."
+            )
+        # Confirmed directory exists in source and destination directory does
+        # not already exist, so directory should be uploaded:
         else:
-            source_s3_dir_keys = source_s3.list_keys(
+            logging.info(
+                "Downloading source S3 directory %s to %s",
+                self.source_s3_dir, self.dest_s3_dir
+            )
+
+            source_s3_dir_keys = source_s3_hook.list_keys(
                 bucket_name = self.source_s3_bucket,
                 prefix = self.source_s3_dir,
-                delimiter = '/')
+                delimiter = '/'
+            )
 
-            for source_s3_key in source_s3_dir_keys:
+            for source_s3_dir_key in source_s3_dir_keys:
 
-                source_s3_key_obj = source_s3.get_key(source_s3_key)
-                
-                dest_s3.load_string(
-                    string_data=source_s3_key_obj.get()['Body'].read().decode('utf-8'),
+                s3_key_obj = source_s3_hook.get_key(
+                    key=source_s3_dir_key,
+                    bucket_name=self.source_s3_bucket
+                )
+
+                # list_keys returns the key with the directory included.
+                # Only file name needed:
+                source_s3_key = source_s3_dir_key.replace(self.source_s3_dir, '')
+
+                dest_s3_hook.load_string(
+                    string_data=s3_key_obj.get()['Body'].read().decode('utf-8'),
                     key=self.dest_s3_dir + source_s3_key,
-                    replace=self.replace)
+                    bucket_name=self.dest_s3_bucket,
+                    replace=self.replace
+                )
+
                 logging.info(
-                    "Success: Copy " + source_s3_key + " to "
-                    + self.dest_s3_dir + source_s3_key)
+                    f"Copied {self.dest_s3_dir}{source_s3_key} successfully."
+                )
 
             logging.info(
-                "Success: Copy " + self.source_s3_dir + " to " + self.dest_s3_dir)
+                f"Success: Copy {self.source_s3_dir} to {self.dest_s3_dir}"
+            )
