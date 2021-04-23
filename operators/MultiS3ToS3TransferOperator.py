@@ -69,12 +69,12 @@ class MultiS3ToS3TransferOperator(BaseOperator):
             bucket_name = self.dest_s3_bucket,
             prefix = self.dest_s3_dir,
             delimiter = '/'
-        ):
+        ) and not self.replace:
             raise AirflowSkipException(
                 f"The dest {self.dest_s3_dir} already exists."
             )
         # Confirmed directory exists in source and destination directory does
-        # not already exist, so directory should be uploaded:
+        # not already exist, or should be replaced, so upload directory:
         else:
             logging.info(
                 "Downloading source S3 directory %s to %s",
